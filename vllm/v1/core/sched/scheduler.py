@@ -2225,11 +2225,12 @@ class Scheduler(SchedulerInterface):
                         adj_draft_tokens -= (
                             scheduler_output.num_invalid_spec_tokens.get(req_id, 0)
                         )
-                    request.spec_decode_metrics.observe(
-                        num_draft_tokens=adj_draft_tokens,
-                        num_accepted=num_accepted,
-                        detailed=self.spec_decode_metrics_level == "detailed",
-                    )
+                    if adj_draft_tokens > 0:
+                        request.spec_decode_metrics.observe(
+                            num_draft_tokens=adj_draft_tokens,
+                            num_accepted=num_accepted,
+                            detailed=self.spec_decode_metrics_level == "detailed",
+                        )
 
             # Free encoder inputs only after the step has actually executed.
             if request.has_encoder_inputs:
@@ -3057,10 +3058,14 @@ class Scheduler(SchedulerInterface):
     ) -> SpecDecodingStats | None:
         if not self.log_stats or not num_draft_tokens:
             return None
-        if spec_decoding_stats is None:
-            spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
         if num_invalid_spec_tokens:
             num_draft_tokens -= num_invalid_spec_tokens.get(request_id, 0)
+        if num_draft_tokens <= 0:
+            # Every draft was invalidated (e.g. by structured output), so the
+            # request made no proposal this step and must not count as a draft.
+            return spec_decoding_stats
+        if spec_decoding_stats is None:
+            spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
         spec_decoding_stats.observe_draft(
             num_draft_tokens=num_draft_tokens, num_accepted_tokens=num_accepted_tokens
         )

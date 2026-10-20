@@ -2414,6 +2414,56 @@ def test_per_request_spec_decode_acceptance_disabled_by_default():
     assert scheduler.requests[req.request_id].spec_decode_metrics is None
 
 
+def test_spec_decoding_stats_skip_fully_invalidated_drafts():
+    """A request whose drafts were all grammar-invalidated made no proposal.
+
+    It must not count as a draft in the aggregate stats, which would inflate
+    the denominator of the acceptance length and rate, nor as a spec step in
+    its per-request histogram, while the other request keeps its stats.
+    """
+    num_spec_tokens = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec_tokens,
+        per_request_spec_decode_metrics="summary",
+    )
+    requests = create_requests(num_requests=2, num_tokens=1)
+    req_ids = [request.request_id for request in requests]
+    req_to_index = {req_id: i for i, req_id in enumerate(req_ids)}
+    for request in requests:
+        scheduler.add_request(request)
+
+    def _mk_output(sampled):
+        return ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index=req_to_index,
+            sampled_token_ids=sampled,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+
+    scheduler.update_from_output(scheduler.schedule(), _mk_output([[0], [0]]))
+    scheduler.update_draft_token_ids(DraftTokenIds(req_ids, [[1, 2, 3], [4, 5, 6]]))
+    output = scheduler.schedule()
+    # Structured output rejected every draft of the first request.
+    output.num_invalid_spec_tokens = {req_ids[0]: num_spec_tokens}
+    engine_core_outputs = scheduler.update_from_output(
+        output, _mk_output([[7], [4, 5, 8]])
+    )
+
+    stats = engine_core_outputs[0].scheduler_stats.spec_decoding_stats
+    assert stats.num_drafts == 1
+    assert stats.num_draft_tokens == 3
+    assert stats.num_accepted_tokens == 2
+
+    invalidated = scheduler.requests[req_ids[0]].spec_decode_metrics.to_dict()
+    assert invalidated["num_draft_tokens"] == 0
+    assert invalidated["acceptance_histogram"] == [0, 0, 0, 0]
+    kept = scheduler.requests[req_ids[1]].spec_decode_metrics.to_dict()
+    assert kept["num_draft_tokens"] == 3
+    assert kept["acceptance_histogram"] == [0, 0, 1, 0]
+
+
 def test_spec_decoding_stats_empty_output():
     """Test that spec decoding stats handle empty output tokens gracefully.
 
